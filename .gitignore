@@ -1,0 +1,4 @@
+pico-examples/
+pico-sdk/
+**/build
+playground/*
