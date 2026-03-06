@@ -1,3 +1,5 @@
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <math.h>
 #include <limits.h>
@@ -8,11 +10,16 @@
 #include "btstack.h"
 #include "notify.h" // generated from .gatt file
 
-#define LED_PIN 15 
+#define NOTIFY_LED_PIN 15 
+#define STATUS_LED_PIN 2
+#define BTN_PIN 16 
+
 const int MAX_DUTY_CYCLE = USHRT_MAX;
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static int le_notification_enabled = 0;
+
+static volatile bool adv_ready = false;
 
 // forward declare
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size);
@@ -31,7 +38,7 @@ void set_led_duty_cycle(uint gpio_pin, uint16_t value) {
 
 void led_short_pulse() {
 	for (int i = 0; i < 75; i++) {
-		set_led_duty_cycle(LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
+		set_led_duty_cycle(NOTIFY_LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
 		sleep_ms(5);
 
 	}
@@ -39,14 +46,14 @@ void led_short_pulse() {
 	sleep_ms(200);
 
 	for (int i = 75; i >= 0; i--) {
-		set_led_duty_cycle(LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
+		set_led_duty_cycle(NOTIFY_LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
 		sleep_ms(5);
 	}
 }
 
 void led_long_pulse() {
 	for (int i = 0; i < 75; i++) {
-		set_led_duty_cycle(LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
+		set_led_duty_cycle(NOTIFY_LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
 		sleep_ms(5);
 
 	}
@@ -54,7 +61,7 @@ void led_long_pulse() {
 	sleep_ms(500);
 
 	for (int i = 75; i >= 0; i--) {
-		set_led_duty_cycle(LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
+		set_led_duty_cycle(NOTIFY_LED_PIN, (int) floor(MAX_DUTY_CYCLE * ((float)i / 100)));
 		sleep_ms(5);
 	}
 }
@@ -85,11 +92,13 @@ static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packe
 			if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING) {
 				printf("BLE up and advertising\n");
 				setup_advertising();
+				adv_ready = true;
 			}
 			break;
 		case HCI_EVENT_DISCONNECTION_COMPLETE:
 			printf("Disconnected, restarting ads\n");
 			setup_advertising();
+			adv_ready = true;
 			break;
 		default:
 			break;
@@ -109,6 +118,25 @@ static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle, 
 	return 0;
 }
 
+static void handle_btn_interrupt(uint gpio, uint32_t events) {
+	printf("[BTN] Button handler\n");
+	if (events & GPIO_IRQ_EDGE_RISE) {
+		// TODO: Convert advertising to only work on button press
+		/* if (adv_ready) {
+			setup_advertising();
+			sleep_ms(250);
+			gap_advertisements_enable(0);
+		} */
+		printf("[BTN] Button released\n");
+		gpio_put(STATUS_LED_PIN, 0);
+	}
+
+	if (events & GPIO_IRQ_EDGE_FALL) {
+		printf("[BTN] Button pressed\n");
+		gpio_put(STATUS_LED_PIN, 1);
+	}
+}
+
 int main() {
 	stdio_init_all();
 
@@ -120,7 +148,23 @@ int main() {
 	l2cap_init();
 	sm_init();
 
-	gpio_set_function(LED_PIN, GPIO_FUNC_PWM);
+	gpio_init(STATUS_LED_PIN);
+	gpio_set_function(NOTIFY_LED_PIN, GPIO_FUNC_PWM);
+	gpio_set_dir(STATUS_LED_PIN, GPIO_OUT);
+	// gpio_put(STATUS_LED_PIN, 0);
+
+	gpio_init(BTN_PIN);
+	gpio_set_dir(BTN_PIN, GPIO_IN);
+	gpio_pull_up(BTN_PIN);
+
+	// gpio_pull_down(BTN_PIN);
+
+	gpio_set_irq_enabled_with_callback(
+		BTN_PIN,
+		GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE,
+		true,
+		&handle_btn_interrupt
+	);
 
 	att_server_init(profile_data, att_read_callback, att_write_callback);
 
