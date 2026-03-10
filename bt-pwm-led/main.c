@@ -18,8 +18,13 @@ const int MAX_DUTY_CYCLE = USHRT_MAX;
 
 static btstack_packet_callback_registration_t hci_event_callback_registration;
 static int le_notification_enabled = 0;
+static btstack_timer_source_t btn_timer;
 
-static volatile bool adv_ready = false;
+static volatile bool advertising = false;
+static volatile bool btn_pressed = false;
+static volatile uint32_t press_time_ms = 0;
+
+static uint8_t blink_state = 0;
 
 // forward declare
 static void packet_handler(uint8_t packet_type, uint16_t channel, uint8_t *packet, uint16_t size);
@@ -119,22 +124,49 @@ static int att_write_callback(hci_con_handle_t con_handle, uint16_t att_handle, 
 }
 
 static void handle_btn_interrupt(uint gpio, uint32_t events) {
-	printf("[BTN] Button handler\n");
-	if (events & GPIO_IRQ_EDGE_RISE) {
-		// TODO: Convert advertising to only work on button press
-		/* if (adv_ready) {
-			setup_advertising();
-			sleep_ms(250);
-			gap_advertisements_enable(0);
-		} */
-		printf("[BTN] Button released\n");
-		gpio_put(STATUS_LED_PIN, 0);
-	}
+	uint32_t now = to_ms_since_boot(get_absolute_time());
 
 	if (events & GPIO_IRQ_EDGE_FALL) {
-		printf("[BTN] Button pressed\n");
-		gpio_put(STATUS_LED_PIN, 1);
+		static uint32_t last_event = 0;
+
+		if ((now - last_event) > 50) {
+			btn_pressed = true;
+			press_time_ms = now;
+		}
+
+		last_event = now;
 	}
+}
+
+static void handle_advertise() {
+	advertising = true;
+	setup_advertising();
+	sleep_ms(50);
+	// Stop Advertising
+}
+
+static void btn_poll_handler(btstack_timer_source_t *ts) {
+	if (btn_pressed) {
+		uint32_t held = to_ms_since_boot(get_absolute_time()) - press_time_ms;
+
+		if (held > 1000) {
+			btn_pressed = false;
+			handle_advertise();
+			blink_state = 1;
+		}
+	}
+
+	// This logic I think runs regardless of the button press
+	switch (blink_state) {
+		case 1: gpio_put(STATUS_LED_PIN, 1); blink_state++; break;
+		case 6: gpio_put(STATUS_LED_PIN, 0); blink_state++; break;
+		case 7: gpio_put(STATUS_LED_PIN, 1); blink_state++; break;
+		case 12: gpio_put(STATUS_LED_PIN, 0); blink_state = 0; break;
+		default: if (blink_state > 0) blink_state++; break;
+	}
+
+	btstack_run_loop_set_timer(ts, 50);
+	btstack_run_loop_add_timer(ts);
 }
 
 int main() {
@@ -174,6 +206,10 @@ int main() {
 	att_server_register_packet_handler(packet_handler);
 
 	hci_power_control(HCI_POWER_ON);
+	
+	btstack_run_loop_set_timer(&btn_timer, 50);
+	btstack_run_loop_set_timer_handler(&btn_timer, btn_poll_handler);
+	btstack_run_loop_add_timer(&btn_timer);
 
 	btstack_run_loop_execute();
 
